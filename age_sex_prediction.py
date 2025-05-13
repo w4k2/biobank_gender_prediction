@@ -20,12 +20,14 @@ NUM_REPEATS = 1
 SEED = 1234
 IMG_SIZE = 224
 SUMMARY_LOG = "results_5x1.txt"
-MODEL_SAVE_PATH = "gender_classifier_model.pth"
+GENDER_MODEL_SAVE_NAME = "gender_classifier_model"
+AGE_MODEL_SAVE_NAME = "age_classifier_model"
+NUMBER_OF_RECORDS = 5000
 
 torch.manual_seed(SEED)
 np.random.seed(SEED)
 
-base_model = timm.create_model('resnet50.a1_in1k', pretrained=True)
+base_model = timm.create_model('resnet18.a1_in1k', pretrained=True)
 num_features = base_model.get_classifier().in_features
 base_model.reset_classifier(0)
 
@@ -33,7 +35,7 @@ class GenderClassifier(nn.Module):
     def __init__(self, base_model):
         super().__init__()
         self.base = base_model
-        self.head = nn.Linear(num_features, 1)
+        self.head = nn.Linear(num_features, 2)
 
     def forward(self, x):
         features = self.base(x)
@@ -61,7 +63,8 @@ class DKIMDataset(Dataset):
     def __getitem__(self, idx):
         row = self.df.iloc[idx]
         dcm_path = row['filepath']
-        gender = torch.tensor(row['gender'], dtype=torch.float32)  # 0 or 1
+        gender = torch.tensor(row['gender'], dtype=torch.long)  # 0 or 1
+        age = torch.tensor(row['age'], dtype=torch.long)
 
         try:
             dcm = pydicom.dcmread(dcm_path)
@@ -77,7 +80,7 @@ class DKIMDataset(Dataset):
             if self.transform:
                 img = self.transform(img)
 
-            return img, gender
+            return img, gender, age
 
         except Exception as e:
             print(f"Skipping corrupt DICOM: {dcm_path} — {str(e)}")
@@ -92,10 +95,10 @@ transform = transforms.Compose([
 ])
 
 
-def train():
+def train_gender():
     dataframe_path = 'labels_sex_age.xlsx'
     # limit to 10k images
-    full_df = pd.read_excel(dataframe_path)[:10000]
+    full_df = pd.read_excel(dataframe_path)[:NUMBER_OF_RECORDS]
 
     # 1 -- changed to --> 0    -- man
     # 2 -- changed to --> 1    -- woman
@@ -123,13 +126,13 @@ def train():
         val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False)
 
         model = GenderClassifier(base_model)
-        criterion = nn.BCEWithLogitsLoss()
+        criterion = nn.CrossEntropyLoss()
         optimizer = torch.optim.Adam(model.parameters(), lr=LR)
 
         for epoch in range(NUM_EPOCHS):
             model.train()
             total_loss = 0
-            for images, genders in tqdm(train_loader, desc=f"Train Epoch {epoch+1}", leave=False):
+            for images, genders, age in tqdm(train_loader, desc=f"Train Epoch {epoch+1}", leave=False):
                 preds = model(images)
                 loss = criterion(preds, genders)
 
@@ -148,7 +151,7 @@ def train():
             all_targets = []
 
             with torch.no_grad():
-                for images, genders in tqdm(val_loader, desc=f"Validation Epoch {epoch+1}", leave=False):
+                for images, genders, age in tqdm(val_loader, desc=f"Validation Epoch {epoch+1}", leave=False):
                     preds = model(images)
                     loss = criterion(preds, genders)
                     val_loss += loss.item()
@@ -175,6 +178,9 @@ def train():
 
             print(f"Fold {fold+1} | Epoch {epoch+1} | Val Loss: {avg_val_loss:.4f}")
             print(f"Accuracy: {acc:.4f} | Precision: {prec:.4f} | Recall: {rec:.4f} | F1: {f1:.4f}")
+        
+        torch.save(model.state_dict(), f"{GENDER_MODEL_SAVE_NAME}_{fold+1}e_{NUMBER_OF_RECORDS}.pth")
+        print(f"\nModel weights saved to: {GENDER_MODEL_SAVE_NAME}")
 
     summary = []
     summary.append("\n=== Summary over all folds ===")
@@ -193,12 +199,11 @@ def train():
     for line in summary:
         print(line)
 
+    SUMMARY_LOG = "results_2x1_gender_resnet18.txt"
+
     with open(SUMMARY_LOG, "a") as f:
         for line in summary:
             f.write(line + "\n")
-
-    torch.save(model.state_dict(), MODEL_SAVE_PATH)
-    print(f"\nModel weights saved to: {MODEL_SAVE_PATH}")
 
 
 def age_to_range(age):
@@ -206,7 +211,7 @@ def age_to_range(age):
 
 def train_age_pred():
     dataframe_path = 'labels_sex_age.xlsx'
-    full_df = pd.read_excel(dataframe_path)[:10000]
+    full_df = pd.read_excel(dataframe_path)[:NUMBER_OF_RECORDS]
 
     # Convert age to age ranges
     full_df['age_range'] = full_df['age'].apply(age_to_range)
@@ -239,9 +244,9 @@ def train_age_pred():
         for epoch in range(NUM_EPOCHS):
             model.train()
             total_loss = 0
-            for images, age_ranges in tqdm(train_loader, desc=f"Train Epoch {epoch+1}", leave=False):
+            for images, gender, age in tqdm(train_loader, desc=f"Train Epoch {epoch+1}", leave=False):
                 preds = model(images)
-                loss = criterion(preds, age_ranges.long())
+                loss = criterion(preds, age)
 
                 optimizer.zero_grad()
                 loss.backward()
@@ -258,13 +263,13 @@ def train_age_pred():
             all_targets = []
 
             with torch.no_grad():
-                for images, age_ranges in tqdm(val_loader, desc=f"Validation Epoch {epoch+1}", leave=False):
+                for images, gender, age in tqdm(val_loader, desc=f"Validation Epoch {epoch+1}", leave=False):
                     preds = model(images)
-                    loss = criterion(preds, age_ranges.long())
+                    loss = criterion(preds, age)
                     val_loss += loss.item()
 
                     preds = torch.argmax(preds, dim=1).cpu().numpy()
-                    targets = age_ranges.cpu().numpy()
+                    targets = age.cpu().numpy()
 
                     all_preds.extend(preds)
                     all_targets.extend(targets)
@@ -284,6 +289,9 @@ def train_age_pred():
 
             print(f"Fold {fold+1} | Epoch {epoch+1} | Val Loss: {avg_val_loss:.4f}")
             print(f"Accuracy: {acc:.4f} | Precision: {prec:.4f} | Recall: {rec:.4f} | F1: {f1:.4f}")
+
+        torch.save(model.state_dict(), f"{AGE_MODEL_SAVE_NAME}_{fold+1}e_{NUMBER_OF_RECORDS}.pth")
+        print(f"\nModel weights saved to: {AGE_MODEL_SAVE_NAME}")
 
     summary = []
     summary.append("=== Summary over all folds ===")
@@ -309,4 +317,4 @@ def train_age_pred():
             f.write(line + "\n")
 
 if __name__ == "__main__":
-    train_age_pred()
+    train_gender()
