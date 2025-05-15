@@ -11,6 +11,7 @@ import pandas as pd
 import pydicom
 from PIL import Image
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+from sklearn.model_selection import train_test_split
 
 NUM_EPOCHS = 10
 BATCH_SIZE = 32
@@ -23,6 +24,7 @@ SUMMARY_LOG = "results_5x1.txt"
 GENDER_MODEL_SAVE_NAME = "gender_classifier_model"
 AGE_MODEL_SAVE_NAME = "age_classifier_model"
 NUMBER_OF_RECORDS = 5000
+TRAIN_RATIO = 0.75
 
 torch.manual_seed(SEED)
 np.random.seed(SEED)
@@ -64,7 +66,7 @@ class DKIMDataset(Dataset):
         row = self.df.iloc[idx]
         dcm_path = row['filepath']
         gender = torch.tensor(row['gender'], dtype=torch.long)  # 0 or 1
-        age = torch.tensor(row['age'], dtype=torch.long)
+        age = torch.tensor(row['age_range'], dtype=torch.long)
 
         try:
             dcm = pydicom.dcmread(dcm_path)
@@ -115,9 +117,10 @@ def train_gender():
 
     for fold, (train_idx, val_idx) in enumerate(rskf.split(full_df, full_df['gender'])):
         print(f"\nFold {fold + 1}/{NUM_FOLDS*NUM_REPEATS}")
+        train_df, val_df = train_test_split(full_df, train_size=TRAIN_RATIO, stratify=full_df['gender'] ,random_state=SEED)
 
-        train_df = full_df.iloc[train_idx].reset_index(drop=True)
-        val_df = full_df.iloc[val_idx].reset_index(drop=True)
+        train_df = train_df.reset_index(drop=True)
+        val_df = val_df.reset_index(drop=True)
 
         train_dataset = DKIMDataset(train_df, transform=transform)
         val_dataset = DKIMDataset(val_df, transform=transform)
@@ -156,11 +159,10 @@ def train_gender():
                     loss = criterion(preds, genders)
                     val_loss += loss.item()
 
-                    probs = torch.sigmoid(preds)
-                    binary_preds = (probs > 0.5).int().cpu().numpy()
+                    predicted_labels = torch.argmax(preds, dim=1).cpu().numpy()
                     targets = genders.int().cpu().numpy()
 
-                    all_preds.extend(binary_preds)
+                    all_preds.extend(predicted_labels)
                     all_targets.extend(targets)
 
             avg_val_loss = val_loss / len(val_loader)
@@ -181,6 +183,7 @@ def train_gender():
         
         torch.save(model.state_dict(), f"{GENDER_MODEL_SAVE_NAME}_{fold+1}e_{NUMBER_OF_RECORDS}.pth")
         print(f"\nModel weights saved to: {GENDER_MODEL_SAVE_NAME}")
+        break
 
     summary = []
     summary.append("\n=== Summary over all folds ===")
@@ -227,9 +230,13 @@ def train_age_pred():
 
     for fold, (train_idx, val_idx) in enumerate(rskf.split(full_df, full_df['age_range'])):
         print(f"\nFold {fold + 1}/{NUM_FOLDS*NUM_REPEATS}")
+        train_df, val_df = train_test_split(full_df, train_size=TRAIN_RATIO, stratify=full_df['age_range'] ,random_state=SEED)
 
-        train_df = full_df.iloc[train_idx].reset_index(drop=True)
-        val_df = full_df.iloc[val_idx].reset_index(drop=True)
+        train_df = train_df.reset_index(drop=True)
+        val_df = val_df.reset_index(drop=True)
+
+        # train_df = full_df.iloc[train_idx].reset_index(drop=True)
+        # val_df = full_df.iloc[val_idx].reset_index(drop=True)
 
         train_dataset = DKIMDataset(train_df, transform=transform)
         val_dataset = DKIMDataset(val_df, transform=transform)
@@ -278,9 +285,9 @@ def train_age_pred():
             val_losses.append(avg_val_loss)
 
             acc = accuracy_score(all_targets, all_preds)
-            prec = precision_score(all_targets, all_preds, zero_division=0)
-            rec = recall_score(all_targets, all_preds, zero_division=0)
-            f1 = f1_score(all_targets, all_preds, zero_division=0)
+            prec = precision_score(all_targets, all_preds, average='weighted',zero_division=0)
+            rec = recall_score(all_targets, all_preds, average='weighted', zero_division=0)
+            f1 = f1_score(all_targets, all_preds, average='weighted', zero_division=0)
 
             all_accuracies.append(acc)
             all_precisions.append(prec)
@@ -292,6 +299,7 @@ def train_age_pred():
 
         torch.save(model.state_dict(), f"{AGE_MODEL_SAVE_NAME}_{fold+1}e_{NUMBER_OF_RECORDS}.pth")
         print(f"\nModel weights saved to: {AGE_MODEL_SAVE_NAME}")
+        break
 
     summary = []
     summary.append("=== Summary over all folds ===")
@@ -317,4 +325,4 @@ def train_age_pred():
             f.write(line + "\n")
 
 if __name__ == "__main__":
-    train_gender()
+    train_age_pred()

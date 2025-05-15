@@ -10,10 +10,10 @@ import torchvision.transforms as transforms
 import matplotlib.pyplot as plt
 from tqdm import tqdm 
 
-MODEL_PATH = "gender_classifier_model_resnet18_10e_5000.pth"
+MODEL_PATH = "age_classifier_model_resnet18_10e_5000.pth"
 IMG_SIZE = 224
 SEED = 1234
-MAX_EVALS_SHAP = 2000
+MAX_EVALS_SHAP = 20
 N_SAMPLES = 6
 
 def age_to_range(age):
@@ -41,7 +41,7 @@ transform = transforms.Compose([
     transforms.ToTensor()
 ])
 
-base_model = timm.create_model('resnet50.a1_in1k', pretrained=False)
+base_model = timm.create_model('resnet18.a1_in1k', pretrained=False)
 num_features = base_model.get_classifier().in_features
 base_model.reset_classifier(0)
 
@@ -53,34 +53,39 @@ model.eval()
 
 dataframe_path = 'labels_sex_age.xlsx'
 full_df = pd.read_excel(dataframe_path)[18000:18473]
-full_df['age'] = full_df['age'].apply(age_to_range)
+full_df['gender'] = full_df['gender'].replace({1: 0, 2: 1})
+full_df['age_range'] = full_df['age'].apply(age_to_range)
 
 dataset = DKIMDataset(full_df, transform=transform)
 
 logits_list = []
 
 
-for idx in tqdm(range(len(dataset))):
-    image, gender, age = dataset[idx]
-    image = image.unsqueeze(0)
-    logits = model(image).detach().numpy().squeeze()
-    logits_list.append(logits)
+# for idx in tqdm(range(len(dataset))):
+#     image, gender, age = dataset[idx]
+#     image = image.unsqueeze(0)
+#     logits = model(image).detach().numpy().squeeze()
+#     logits_list.append(logits)
 
 
-logits_array = np.array(logits_list)
-confidence_scores = np.max(np.abs(logits_array), axis=1)
-top_indices = np.argsort(confidence_scores)[-N_SAMPLES:][::-1]
-print(f"Top {N_SAMPLES} samples selected based on model confidence:\n{top_indices}")
+# logits_array = np.array(logits_list)
+# confidence_scores = np.max(np.abs(logits_array), axis=1)
+# top_indices = np.argsort(confidence_scores)[-N_SAMPLES:][::-1]
+# print(f"Top {N_SAMPLES} samples selected based on model confidence:\n{top_indices}")
+top_indices = np.array([336, 351, 107,  341, 340, 338])
 
 
-images, ages = zip(*[dataset[idx][:2] for idx in top_indices])
+images, genders, ages = zip(*[dataset[idx][:3] for idx in top_indices])
+
 ages = np.array(ages)
+genders = np.array(genders)
+
 images = np.stack(images)
 images = np.moveaxis(images, 1, 3)
 
 
 masker_blur = shap.maskers.Image("blur(128,128)", images[0].shape)
-explainer = shap.Explainer(f, masker_blur, output_names=classes_gender)
+explainer = shap.Explainer(f, masker_blur, output_names=classes_age)
 
 shap_values = explainer(images, max_evals=MAX_EVALS_SHAP, batch_size=8,
                         outputs=shap.Explanation.argsort.flip[:7])
@@ -91,7 +96,7 @@ shap_values.values = [val for val in np.moveaxis(shap_values.values, -1, 0)]
 shap.image_plot(shap_values=shap_values.values,
                 pixel_values=shap_values.data,
                 labels=shap_values.output_names, show=False,
-                true_labels=[l for l in np.array(classes_gender)[ages[:N_SAMPLES]]])
+                true_labels=[l for l in np.array(classes_age)[ages[:7]]])
 
 plt.savefig('shap_plot.png')
 plt.close()
