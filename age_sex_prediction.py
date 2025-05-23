@@ -13,7 +13,7 @@ from PIL import Image
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 from sklearn.model_selection import train_test_split
 
-NUM_EPOCHS = 10
+NUM_EPOCHS = 5
 BATCH_SIZE = 32
 LR = 1e-4
 NUM_FOLDS = 2
@@ -23,21 +23,41 @@ IMG_SIZE = 224
 SUMMARY_LOG = "results_5x1.txt"
 GENDER_MODEL_SAVE_NAME = "gender_classifier_model"
 AGE_MODEL_SAVE_NAME = "age_classifier_model"
-NUMBER_OF_RECORDS = 5000
-TRAIN_RATIO = 0.75
+NUMBER_OF_RECORDS = 16000
+TRAIN_RATIO = 0.8
 
 torch.manual_seed(SEED)
 np.random.seed(SEED)
 
-base_model = timm.create_model('resnet18.a1_in1k', pretrained=True)
+base_model = timm.create_model('resnet50.a1_in1k', pretrained=True)
 num_features = base_model.get_classifier().in_features
 base_model.reset_classifier(0)
+
+
+def load_RETFound(pretraining_dataset):
+    model = models.models_vit.__dict__['vit_large_patch16'](num_classes=2, drop_path_rate=0.2, global_pool=True)
+
+    checkpoint = torch.load(f'weights/RETFound_{pretraining_dataset}_weights.pth', map_location='cpu')
+    checkpoint_model = checkpoint['model']
+    state_dict = model.state_dict()
+    for k in ['head.weight', 'head.bias']:
+        if k in checkpoint_model and checkpoint_model[k].shape != state_dict[k].shape:
+            print(f"Removing key {k} from pretrained checkpoint")
+            del checkpoint_model[k]
+
+    interpolate_pos_embed(model, checkpoint_model)
+    msg = model.load_state_dict(checkpoint_model, strict=False)
+
+    assert set(msg.missing_keys) == {'head.weight', 'head.bias', 'fc_norm.weight', 'fc_norm.bias'}
+
+    trunc_normal_(model.head.weight, std=2e-5)
+    return model
 
 class GenderClassifier(nn.Module):
     def __init__(self, base_model):
         super().__init__()
         self.base = base_model
-        self.head = nn.Linear(num_features, 2)
+        self.head = nn.Linear(num_features, 1)
 
     def forward(self, x):
         features = self.base(x)
@@ -65,7 +85,7 @@ class DKIMDataset(Dataset):
     def __getitem__(self, idx):
         row = self.df.iloc[idx]
         dcm_path = row['filepath']
-        gender = torch.tensor(row['gender'], dtype=torch.long)  # 0 or 1
+        gender = torch.tensor(row['gender'], dtype=torch.float32)  # 0 or 1
         age = torch.tensor(row['age_range'], dtype=torch.long)
 
         try:
@@ -105,6 +125,7 @@ def train_gender():
     # 1 -- changed to --> 0    -- man
     # 2 -- changed to --> 1    -- woman
     full_df['gender'] = full_df['gender'].replace({1: 0, 2: 1})
+    full_df['age_range'] = full_df['age'].apply(age_to_range)
 
     rskf = RepeatedStratifiedKFold(n_splits=NUM_FOLDS, n_repeats=NUM_REPEATS, random_state=SEED)
 
@@ -129,7 +150,12 @@ def train_gender():
         val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False)
 
         model = GenderClassifier(base_model)
-        criterion = nn.CrossEntropyLoss()
+        #  to be removed
+        # state_dict = torch.load('gender_classifier_model_10e_16000.pth')
+        # model.load_state_dict(state_dict)
+        # to be removed
+
+        criterion = nn.BCEWithLogitsLoss()
         optimizer = torch.optim.Adam(model.parameters(), lr=LR)
 
         for epoch in range(NUM_EPOCHS):
@@ -159,10 +185,11 @@ def train_gender():
                     loss = criterion(preds, genders)
                     val_loss += loss.item()
 
-                    predicted_labels = torch.argmax(preds, dim=1).cpu().numpy()
+                    probs = torch.sigmoid(preds)
+                    binary_preds = (probs > 0.5).int().cpu().numpy()
                     targets = genders.int().cpu().numpy()
 
-                    all_preds.extend(predicted_labels)
+                    all_preds.extend(binary_preds)
                     all_targets.extend(targets)
 
             avg_val_loss = val_loss / len(val_loader)
@@ -181,7 +208,7 @@ def train_gender():
             print(f"Fold {fold+1} | Epoch {epoch+1} | Val Loss: {avg_val_loss:.4f}")
             print(f"Accuracy: {acc:.4f} | Precision: {prec:.4f} | Recall: {rec:.4f} | F1: {f1:.4f}")
         
-        torch.save(model.state_dict(), f"{GENDER_MODEL_SAVE_NAME}_{fold+1}e_{NUMBER_OF_RECORDS}.pth")
+        torch.save(model.state_dict(), f"{GENDER_MODEL_SAVE_NAME}_{NUM_EPOCHS}e_{NUMBER_OF_RECORDS}.pth")
         print(f"\nModel weights saved to: {GENDER_MODEL_SAVE_NAME}")
         break
 
@@ -202,7 +229,7 @@ def train_gender():
     for line in summary:
         print(line)
 
-    SUMMARY_LOG = "results_2x1_gender_resnet18.txt"
+    SUMMARY_LOG = "results_e10_gender_resnet50.txt"
 
     with open(SUMMARY_LOG, "a") as f:
         for line in summary:
@@ -297,7 +324,7 @@ def train_age_pred():
             print(f"Fold {fold+1} | Epoch {epoch+1} | Val Loss: {avg_val_loss:.4f}")
             print(f"Accuracy: {acc:.4f} | Precision: {prec:.4f} | Recall: {rec:.4f} | F1: {f1:.4f}")
 
-        torch.save(model.state_dict(), f"{AGE_MODEL_SAVE_NAME}_{fold+1}e_{NUMBER_OF_RECORDS}.pth")
+        torch.save(model.state_dict(), f"{AGE_MODEL_SAVE_NAME}_{NUM_EPOCHS}e_{NUMBER_OF_RECORDS}.pth")
         print(f"\nModel weights saved to: {AGE_MODEL_SAVE_NAME}")
         break
 
@@ -318,11 +345,11 @@ def train_age_pred():
     for line in summary:
         print(line)
 
-    SUMMARY_LOG = "results_2x1_age.txt"
+    SUMMARY_LOG = "results_e10_age_resnet50.txt"
 
     with open(SUMMARY_LOG, "a") as f:
         for line in summary:
             f.write(line + "\n")
 
 if __name__ == "__main__":
-    train_age_pred()
+    train_gender()
