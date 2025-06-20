@@ -1,1 +1,4 @@
 *.pth
+__pycache__
+*.png
+*.xlsx
