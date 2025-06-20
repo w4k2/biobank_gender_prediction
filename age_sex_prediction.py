@@ -12,8 +12,11 @@ import pydicom
 from PIL import Image
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 from sklearn.model_selection import train_test_split
+from util.pos_embed import interpolate_pos_embed
+from timm.models.layers import trunc_normal_
+import models.models_vit
 
-NUM_EPOCHS = 5
+NUM_EPOCHS = 10
 BATCH_SIZE = 32
 LR = 1e-4
 NUM_FOLDS = 2
@@ -23,19 +26,12 @@ IMG_SIZE = 224
 SUMMARY_LOG = "results_5x1.txt"
 GENDER_MODEL_SAVE_NAME = "gender_classifier_model"
 AGE_MODEL_SAVE_NAME = "age_classifier_model"
-NUMBER_OF_RECORDS = 16000
+NUMBER_OF_RECORDS = 5000
 TRAIN_RATIO = 0.8
-
-torch.manual_seed(SEED)
-np.random.seed(SEED)
-
-base_model = timm.create_model('resnet50.a1_in1k', pretrained=True)
-num_features = base_model.get_classifier().in_features
-base_model.reset_classifier(0)
 
 
 def load_RETFound(pretraining_dataset):
-    model = models.models_vit.__dict__['vit_large_patch16'](num_classes=2, drop_path_rate=0.2, global_pool=True)
+    model = models.models_vit.__dict__['vit_large_patch16'](num_classes=2, drop_path_rate=0.2, global_pool="avg")
 
     checkpoint = torch.load(f'weights/RETFound_{pretraining_dataset}_weights.pth', map_location='cpu')
     checkpoint_model = checkpoint['model']
@@ -53,25 +49,60 @@ def load_RETFound(pretraining_dataset):
     trunc_normal_(model.head.weight, std=2e-5)
     return model
 
-class GenderClassifier(nn.Module):
-    def __init__(self, base_model):
+
+torch.manual_seed(SEED)
+np.random.seed(SEED)
+
+# base_model = timm.create_model('resnet50.a1_in1k', pretrained=True)
+base_model = load_RETFound('cfp')
+
+# num_features = base_model.get_classifier().in_features
+# base_model.reset_classifier(0)
+
+
+class GenderClassifierRETFound(nn.Module):
+    def __init__(self, vit_model):
+        super().__init__()
+        self.backbone = vit_model
+        self.backbone.head = nn.Identity()  # remove classification head
+        self.fc_norm = self.backbone.fc_norm  # optional, used in ViT
+        self.head = nn.Linear(1024, 1)  # binary classification
+
+    def forward(self, x):
+        x = self.backbone.forward_features(x)  # [B, 1024]
+        x = self.fc_norm(x)
+        return self.head(x)
+
+    def extract_features(self, x):
+        x = self.backbone.forward_features(x)
+        x = self.fc_norm(x)
+        return x
+
+# class GenderClassifierRETFound(nn.Module):
+#     def __init__(self, vit_model):
+#         super().__init__()
+#         self.backbone = vit_model
+#         self.backbone.head = nn.Identity()  # remove classification head
+#         self.fc_norm = self.backbone.fc_norm  # reuse LayerNorm
+#         self.head = nn.Linear(1024, 1)  # or 2 for multiclass
+
+#     def forward(self, x):
+#         x = self.backbone.forward_features(x)  # should return [B, 1024]
+#         x = self.fc_norm(x)
+#         return self.head(x)
+    
+class GenderClassifierResnet(nn.Module):
+    def __init__(self, base_model, num_features):
         super().__init__()
         self.base = base_model
         self.head = nn.Linear(num_features, 1)
 
     def forward(self, x):
         features = self.base(x)
-        return self.head(features).squeeze(1)
+        return self.head(features).squeeze(1)  # logits
 
-class AgePredictor(nn.Module):
-    def __init__(self, base_model):
-        super().__init__()
-        self.base = base_model
-        self.head = nn.Linear(num_features, 7) # range 20 - 82 -> 7 classes
-
-    def forward(self, x):
-        features = self.base(x)
-        return self.head(features)
+    def extract_features(self, x):
+        return self.base(x)  # feature vector before classification
 
 
 class DKIMDataset(Dataset):
@@ -86,7 +117,8 @@ class DKIMDataset(Dataset):
         row = self.df.iloc[idx]
         dcm_path = row['filepath']
         gender = torch.tensor(row['gender'], dtype=torch.float32)  # 0 or 1
-        age = torch.tensor(row['age_range'], dtype=torch.long)
+        # age = torch.tensor(row['age_range'], dtype=torch.long)
+        _ = None
 
         try:
             dcm = pydicom.dcmread(dcm_path)
@@ -102,7 +134,7 @@ class DKIMDataset(Dataset):
             if self.transform:
                 img = self.transform(img)
 
-            return img, gender, age
+            return img, gender, _
 
         except Exception as e:
             print(f"Skipping corrupt DICOM: {dcm_path} — {str(e)}")
@@ -149,7 +181,7 @@ def train_gender():
         train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
         val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False)
 
-        model = GenderClassifier(base_model)
+        model = GenderClassifierRETFound(base_model)
         #  to be removed
         # state_dict = torch.load('gender_classifier_model_10e_16000.pth')
         # model.load_state_dict(state_dict)
@@ -163,7 +195,7 @@ def train_gender():
             total_loss = 0
             for images, genders, age in tqdm(train_loader, desc=f"Train Epoch {epoch+1}", leave=False):
                 preds = model(images)
-                loss = criterion(preds, genders)
+                loss = criterion(preds.squeeze(1), genders)
 
                 optimizer.zero_grad()
                 loss.backward()
@@ -182,7 +214,7 @@ def train_gender():
             with torch.no_grad():
                 for images, genders, age in tqdm(val_loader, desc=f"Validation Epoch {epoch+1}", leave=False):
                     preds = model(images)
-                    loss = criterion(preds, genders)
+                    loss = criterion(preds.squeeze(1), genders)
                     val_loss += loss.item()
 
                     probs = torch.sigmoid(preds)
